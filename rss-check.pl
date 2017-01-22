@@ -9,11 +9,14 @@ use Getopt::Long;
 use List::Util qw/ any /;
 use Mojo::JSON qw/ decode_json encode_json /;
 use RSS::Check;
+use POSIX qw/ locale_h /;
 
 our $VERSION = '0.01';
 
+my $locale = setlocale(LC_MESSAGES);
+
 my $enc = 'iso-8859-1';
-if (defined $ENV{LANG} and $ENV{LANG} =~ /\.utf-?8$/i) { $enc = 'UTF-8'; }
+if ($locale =~ /\.utf-?8$/i) { $enc = 'UTF-8'; }
 binmode STDOUT, ":encoding($enc)";
 
 GetOptions(
@@ -22,6 +25,9 @@ GetOptions(
     'data-dir|d=s' => \my $data_dir,
     'add|a=s'      => \my $add,
 );
+
+$data_dir //= File::HomeDir->my_home() . "/.rss-check";
+my $sub_file = $data_dir . '/subscriptions';
 
 sub show_copy {
     print <<"COPY";
@@ -50,40 +56,6 @@ $0 [options]
 USAGE
 }
 
-if ($version) { show_ver(); show_copy(); exit 0; }
-
-if ($help) { show_usage(); show_copy(); exit 0; }
-
-$data_dir //= File::HomeDir->my_home() . "/.rss-check";
-my $sub_file = $data_dir . '/subscriptions';
-
-mkdir $data_dir or die "Could not create directory $data_dir: $!\n" unless -d $data_dir;
-
-if ($add) {
-  my @subscriptions = get_subscriptions();
-
-  if (any { $_->{url} eq $add } @subscriptions) {
-    die "Already subscribed to $add.\n";
-  }
-
-  my $id = 0;
-  $id = $subscriptions[-1]->{id} + 1 if @subscriptions;
-  unlink "$data_dir/$id" if -e "$data_dir/$id";
-  my $sub = { id => $id, url => $add };
-  push @subscriptions, $sub;
-
-  write_subscriptions(@subscriptions);
-
-  get_updates($sub);
-
-  exit;
-}
-
-my @subscriptions = get_subscriptions();
-
-for my $sub (@subscriptions) { get_updates($sub); }
-exit;
-
 sub fopen {
   my ($fn, $mode) = @_;
   $mode //= 'r';
@@ -111,20 +83,60 @@ sub write_subscriptions {
 }
 
 sub get_updates {
-  my $sub = shift;
-  my $feed_file = "$data_dir/$sub->{id}";
+  my @subs = @_;
+  my @feeds = RSS::Check->read(@subs);
+  my $printed = 0;
 
-  my $last_id;
-  if (-e $feed_file) {
-    $last_id = slurp($feed_file);
+  foreach my $feed (@feeds) {
+    my $sub = $feed->sub();
+    my $feed_file = "$data_dir/$sub->{id}";
+
+    my $last_id;
+    if (-e $feed_file) {
+      $last_id = slurp($feed_file);
+    }
+
+    my @articles = $feed->until($last_id);
+    printf "%s: %s\n", $feed->{title}, $_->{title} for @articles;
+    $printed = 1 if @articles;
+
+    my $fh = fopen($feed_file, 'w');
+    print {$fh} $feed->last_id;
   }
 
-  my $rss = RSS::Check->read($sub->{url});
-
-  my @articles = $rss->until($last_id);
-
-  printf "%s: %s\n", $rss->{title}, $_->{title} for @articles;
-
-  my $fh = fopen($feed_file, 'w');
-  print {$fh} $rss->last_id;
+  warn "Nothing new in your subscriptions.\n" unless $printed;
 }
+
+# now we get to the running of the script
+
+if ($version) { show_ver(); show_copy(); exit 0; }
+
+if ($help) { show_usage(); show_copy(); exit 0; }
+
+mkdir $data_dir or die "Could not create directory $data_dir: $!\n" unless -d $data_dir;
+
+if ($add) {
+  my @subscriptions = get_subscriptions();
+
+  if (any { $_->{url} eq $add } @subscriptions) {
+    die "Already subscribed to $add.\n";
+  }
+
+  my $id = 0;
+  $id = $subscriptions[-1]->{id} + 1 if @subscriptions;
+  unlink "$data_dir/$id" if -e "$data_dir/$id";
+  my $sub = { id => $id, url => $add };
+  push @subscriptions, $sub;
+
+  write_subscriptions(@subscriptions);
+
+  get_updates($sub);
+
+  exit;
+}
+
+my @subscriptions = get_subscriptions();
+
+get_updates(@subscriptions);
+exit;
+

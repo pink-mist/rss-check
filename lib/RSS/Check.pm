@@ -1,29 +1,58 @@
 package RSS::Check;
 
+use strict;
+use warnings;
+
 use Mojo::UserAgent;
 
 my $ua = Mojo::UserAgent->new();
 
 sub read {
-  my ($class, $url) = @_;
+  my ($class, @subs) = @_;
 
-  my %rss = parse($url, $ua->get($url));
+  my @results;
 
-  bless \%rss, $class;
+  my @batches;
+  my $batch_num = 0;
+  my $count = 0;
+  for my $sub (@subs) {
+    push @{ $batches[$batch_num] }, $sub;
+    $count++;
+    if ($count == 4) { $count = 0; $batch_num++; }
+  }
+
+  foreach my $batch (@batches) {
+    my $num = @{ $batch };
+    my $count = 0;
+    foreach my $sub (@{ $batch }) {
+      $ua->get($sub->{url}, sub {
+        my ($ua, $tx) = @_;
+        my %rss = parse($tx->res->dom);
+
+        if (%rss) { push @results, bless({%rss, sub => $sub}, $class); }
+        else { warn "Not a valid feed: $sub->{url}\n"; }
+
+        Mojo::IOLoop->stop if ++$count == $num;
+     });
+    }
+    Mojo::IOLoop->start unless Mojo::IOLoop->is_running;
+  }
+
+  return @results;
 }
 
 sub parse {
-  my ($url, $tx) = @_;
+  my $dom = shift;
 
-  my $dom = $tx->res->dom;
+  my $first = $dom->children->first;
 
-  if ($dom->children->first->tag eq 'feed') { return parse_atom($dom); }
+  return                  if not defined $first;
 
-  if ($dom->children->first->tag eq 'rss') { return parse_rss($dom); }
+  return parse_atom($dom) if $first->tag eq 'feed';
+  return parse_rss($dom)  if $first->tag eq 'rss';
+  return parse_rdf($dom)  if $first->tag eq 'rdf:RDF';
 
-  if ($dom->children->first->tag eq 'rdf:RDF') { return parse_rdf($dom); }
-
-  die "Not an Atom or RSS feed in $url\n";
+  return;
 }
 
 sub parse_atom {
@@ -101,6 +130,10 @@ sub last_id {
   return $articles[0]->{id};
 }
 
+sub sub {
+  my $rss = shift;
 
+  return $rss->{sub};
+}
 
 1;
